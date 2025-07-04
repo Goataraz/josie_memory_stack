@@ -1,0 +1,34 @@
+version: '3.9'
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - postgres
+      - mongo
+      - chroma
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres/postgres
+      - MONGO_URL=mongodb://mongo:27017
+      - CHROMA_HOST=chroma
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  postgres:
+    image: ankane/pgvector
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+  mongo:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"

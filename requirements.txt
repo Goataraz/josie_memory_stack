@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+redis
+psycopg2-binary
+motor
+chromadb
+SQLAlchemy
+pydantic
+python-dotenv
