@@ -110,13 +110,12 @@ POST /memory/semantic/add         → embed + store memory
 POST /trigger/emotion             → fire event trigger
 GET  /trigger/status              → check emotional state
 
-🔧 Setup (coming soon)
+🔧 Setup
 
-Docker Compose version
-
-.env example
-
-Container orchestration
+1. Install [Docker Compose](https://docs.docker.com/compose/install/).
+2. Copy `.env.example` to `.env` and adjust if needed.
+3. Run `docker compose up -d --build` to start all services.
+4. Visit `http://localhost:8000/docs` for the API docs.
 
 ❤️ Inspired by
 
