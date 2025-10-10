@@ -5,30 +5,61 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - redis
-      - postgres
-      - mongo
-      - chroma
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+      chroma:
+        condition: service_started
     environment:
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres/postgres
       - MONGO_URL=mongodb://mongo:27017
       - CHROMA_HOST=chroma
+      # Optional: tune short-term memory retention
+      - SHORT_TERM_MAX_LEN=1000
+      # - SHORT_TERM_TTL_SECONDS=604800
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
   postgres:
     image: ankane/pgvector
     environment:
       POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
   mongo:
     image: mongo:6
     ports:
       - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
   chroma:
     image: chromadb/chroma:latest
     ports:
       - "8001:8000"
+
+volumes:
+  pgdata:
+  mongodata:

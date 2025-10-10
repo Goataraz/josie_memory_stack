@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import os
+import json
+import hashlib
 import redis
 from redis.exceptions import RedisError
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -16,6 +18,10 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 POSTGRES_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@localhost/postgres")
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 CHROMA_HOST = os.environ.get("CHROMA_HOST", "localhost")
+SHORT_TERM_MAX_LEN = int(os.environ.get("SHORT_TERM_MAX_LEN", "1000"))
+SHORT_TERM_TTL_SECONDS: Optional[int] = (
+    int(os.environ["SHORT_TERM_TTL_SECONDS"]) if os.environ.get("SHORT_TERM_TTL_SECONDS") else None
+)
 
 redis_client = redis.Redis.from_url(REDIS_URL)
 
@@ -37,6 +43,74 @@ async def read_root():
     return {"status": "ok"}
 
 
+@app.get("/health/live", tags=["health"])
+async def live():
+    return {"status": "live"}
+
+
+@app.get("/health/ready", tags=["health"])
+async def ready():
+    checks: Dict[str, Any] = {}
+    # Redis
+    try:
+        checks["redis"] = bool(redis_client.ping())
+    except Exception as e:
+        checks["redis"] = {"ok": False, "error": str(e)}
+    # Postgres
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["postgres"] = True
+    except Exception as e:
+        checks["postgres"] = {"ok": False, "error": str(e)}
+    # Mongo
+    try:
+        await mongo_client.admin.command("ping")
+        checks["mongo"] = True
+    except Exception as e:
+        checks["mongo"] = {"ok": False, "error": str(e)}
+    # Chroma (best-effort)
+    try:
+        # Query small count to verify collection is responsive
+        _ = collection.count()  # type: ignore[attr-defined]
+        checks["chroma"] = True
+    except Exception as e:
+        checks["chroma"] = {"ok": False, "error": str(e)}
+    overall_ok = all(v is True for v in checks.values())
+    if not overall_ok:
+        raise HTTPException(status_code=503, detail=checks)
+    return {"status": "ready", **checks}
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Ensure Postgres schema exists
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS ltm (id TEXT PRIMARY KEY, data JSONB NOT NULL)"
+            ))
+    except Exception:
+        # Defer to runtime errors on first use; readiness will surface issues
+        pass
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        mongo_client.close()
+    except Exception:
+        pass
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+    try:
+        redis_client.close()
+    except Exception:
+        pass
+
+
 
 class TextPayload(BaseModel):
     text: str
@@ -56,7 +130,14 @@ class QueryPayload(BaseModel):
 @app.post("/memory/short-term")
 async def store_short_term(payload: TextPayload):
     try:
-        redis_client.lpush("short_term", payload.text)
+        key = "short_term"
+        redis_client.lpush(key, payload.text)
+        # Trim to bounded length to prevent unbounded growth
+        if SHORT_TERM_MAX_LEN > 0:
+            redis_client.ltrim(key, 0, SHORT_TERM_MAX_LEN - 1)
+        # Optional TTL for the list key
+        if SHORT_TERM_TTL_SECONDS and SHORT_TERM_TTL_SECONDS > 0:
+            redis_client.expire(key, SHORT_TERM_TTL_SECONDS)
         return {"status": "ok"}
     except RedisError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -76,8 +157,8 @@ async def add_long_term(payload: LongTermPayload):
     try:
         with engine.begin() as conn:
             conn.execute(
-                text("INSERT INTO ltm (id, data) VALUES (:id, :data)"),
-                {"id": payload.id, "data": payload.data},
+                text("INSERT INTO ltm (id, data) VALUES (:id, :data::jsonb)"),
+                {"id": payload.id, "data": json.dumps(payload.data)},
             )
         return {"status": "ok"}
     except SQLAlchemyError as e:
@@ -92,8 +173,10 @@ async def save_creative(payload: CreativePayload):
 
 @app.post("/memory/semantic/add")
 async def embed_memory(payload: TextPayload):
-    collection.add(documents=[payload.text], ids=[payload.text])
-    return {"status": "ok"}
+    # Deterministic ID based on content hash to deduplicate
+    memory_id = hashlib.sha256(payload.text.encode("utf-8")).hexdigest()
+    collection.add(documents=[payload.text], ids=[memory_id])
+    return {"status": "ok", "id": memory_id}
 
 
 @app.post("/memory/semantic/query")
